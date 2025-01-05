@@ -1,10 +1,9 @@
 import logging
-import azure.functions as func
+from flask import Flask, request, jsonify
 import torch
 from torchvision import transforms
 from PIL import Image, UnidentifiedImageError
 from io import BytesIO
-#from PeopleClassifier import PeopleClassifier
 
 import timm
 import torch.nn as nn
@@ -36,41 +35,38 @@ class PeopleClassifier(nn.Module):
         x = self.regressor(x)
         return x
 
-app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+app = Flask(__name__)
 
-@app.route(route="PeopleRecognizer")
-def main(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info('Python HTTP trigger function processed a request.')
+# Load the model once at startup to avoid reloading it for every request
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = PeopleClassifier().to(device)
+model.load_state_dict(torch.load("best_model.pth", map_location=device))
+model.eval()
 
-    # Load the model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = PeopleClassifier().to(device)
-    model.load_state_dict(torch.load("best_model.pth", map_location=device))
-    model.eval()
+# Define the image transformation
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
 
-    # Define the transform
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
+@app.route('/PeopleRecognizer', methods=['POST'])
+def main():
+    logging.info('Received a request for PeopleRecognizer webhook.')
 
     try:
-        # Get the image from the request
-        image_data = req.get_body()
+        # Get the image data from the request
+        image_data = request.data
 
         # Log the first few bytes of the image data to check it's valid
-        logging.info(f"Received image data: {image_data[:20]}...")  # Log the first 20 bytes
+        logging.info(f"Received image data: {image_data[:20]}...")
 
         # Try to open the image with PIL
         try:
             image = Image.open(BytesIO(image_data)).convert("RGB")
         except UnidentifiedImageError:
             logging.error('Cannot identify image file')
-            return func.HttpResponse(
-                "Cannot identify image file.",
-                status_code=400
-            )
+            return jsonify({"error": "Cannot identify image file."}), 400
 
         # Log image size and format
         logging.info(f"Image opened with size: {image.size}, format: {image.format}")
@@ -81,15 +77,13 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         # Pass the image through the model
         with torch.no_grad():
             output = model(image)
-        
-        # Return the result
-        return func.HttpResponse(
-            str(output.item()),
-            status_code=200
-        )
+
+        # Assuming the output is a single value (you can adjust this based on your model)
+        return jsonify({"result": output.item()}), 200
+
     except Exception as e:
         logging.error(f"Error processing the request: {e}")
-        return func.HttpResponse(
-            "Failed to process the uploaded file.",
-            status_code=400
-        )
+        return jsonify({"error": "Failed to process the uploaded file."}), 400
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5005)
